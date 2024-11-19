@@ -1,5 +1,8 @@
 'use client';
 import { useState, useEffect } from 'react';
+import { auth, db } from './firebaseConfig';
+import { signInWithPopup, GoogleAuthProvider } from 'firebase/auth';
+import { doc, setDoc, getDoc } from 'firebase/firestore';
 
 const StatsPanel = ({ isOpen, onClose, stats, level, selectedBg, onBgChange }) => {
   const getBgUnlockLevel = (bgNumber) => (bgNumber - 1) * 10;
@@ -107,7 +110,11 @@ const StatsPanel = ({ isOpen, onClose, stats, level, selectedBg, onBgChange }) =
 };
 
 export default function Tamagotchi() {
-  // États
+  // États pour l'authentification
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  // États du jeu
   const [showConfirmRestart, setShowConfirmRestart] = useState(false);
   const [showConfirmRestartAgain, setShowConfirmRestartAgain] = useState(false);
   const [lastShowerDate, setLastShowerDate] = useState(null);
@@ -136,7 +143,7 @@ export default function Tamagotchi() {
 
   // Constantes
   const SHOWER_DURATION = 5;
-  const ZOMBIE_DURATION = 10;
+  const ZOMBIE_DURATION = 14400; // 4 heures en secondes
   const XP_GAIN = 20;
   const SHOWER_XP_MULTIPLIER = 2;
   const OVERFEED_LIMIT = 10;
@@ -181,12 +188,25 @@ export default function Tamagotchi() {
     }
   };
 
+  // Fonction de connexion Google
+  const signInWithGoogle = async () => {
+    try {
+      const provider = new GoogleAuthProvider();
+      const result = await signInWithPopup(auth, provider);
+      setUser(result.user);
+      loadSavedData(result.user.uid);
+    } catch (error) {
+      console.error("Erreur de connexion:", error);
+    }
+  };
+
   // Fonction pour obtenir l'état actuel
   const getState = (healthValue) => {
     if (isDead) return 'dead';
     if (isReviving) return 'zombie';
     if (isShowering) return 'showering';
-    if (overfeedCount > 0) return 'overfed';
+    if (animation) return 'eating';
+    if (overfeedCount > 0 && health >= 100) return 'overfed';
     if (healthValue <= 20) return 'sad';
     if (healthValue <= 50) return 'bad';
     if (healthValue <= 80) return 'ok';
@@ -222,53 +242,30 @@ export default function Tamagotchi() {
     }
   };
 
-  // Fonction de chargement des données sauvegardées
-  const loadSavedData = () => {
-    if (typeof window !== 'undefined') {
-      const savedLastShower = localStorage.getItem('lastShowerDate');
-      setLastShowerDate(savedLastShower);
+  // Fonction de chargement des données depuis Firebase
+  const loadSavedData = async (userId) => {
+    try {
+      const docRef = doc(db, 'saves', userId);
+      const docSnap = await getDoc(docRef);
 
-      const savedStats = localStorage.getItem('tamagotchiStats');
-      if (savedStats) {
-        setStats(JSON.parse(savedStats));
-      }
-
-      const savedBg = localStorage.getItem('selectedBackground');
-      if (savedBg) {
-        setSelectedBg(parseInt(savedBg));
-      }
-
-      const saved = localStorage.getItem('tamagotchiData');
-      if (saved) {
-        const data = JSON.parse(saved);
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setHealth(data.health);
+        setLastFed(data.lastFed);
+        setLevel(data.level);
+        setExperience(data.experience);
+        setExperienceToNextLevel(data.experienceToNextLevel);
         setOverfeedCount(data.overfeedCount || 0);
-        return {
-          health: data.health,
-          lastFed: data.lastFed,
-          level: data.level,
-          experience: data.experience,
-          experienceToNextLevel: data.experienceToNextLevel
-        };
+        setStats(data.stats);
+        setSelectedBg(data.selectedBg);
+        if (data.lastShowerDate) {
+          setLastShowerDate(data.lastShowerDate);
+        }
       }
+    } catch (error) {
+      console.error('Erreur de chargement:', error);
     }
-    return {
-      health: 100,
-      lastFed: Date.now(),
-      level: 1,
-      experience: 0,
-      experienceToNextLevel: 100
-    };
   };
-
-  // Chargement initial des données
-  useEffect(() => {
-    const savedData = loadSavedData();
-    setHealth(savedData.health);
-    setLastFed(savedData.lastFed);
-    setLevel(savedData.level);
-    setExperience(savedData.experience);
-    setExperienceToNextLevel(savedData.experienceToNextLevel);
-  }, []);
 
   // Vérification de la disponibilité de la douche
   const canShower = () => {
@@ -280,66 +277,72 @@ export default function Tamagotchi() {
            lastShower.getFullYear() !== now.getFullYear();
   };
 
-  // Sauvegarde automatique
+  // Sauvegarde automatique dans Firebase
   useEffect(() => {
-    if (typeof window !== 'undefined' && !isDead) {
-      const dataToSave = {
-        health,
-        lastFed,
-        level,
-        experience,
-        experienceToNextLevel,
-        overfeedCount
-      };
-      localStorage.setItem('tamagotchiData', JSON.stringify(dataToSave));
-      localStorage.setItem('tamagotchiStats', JSON.stringify(stats));
-      localStorage.setItem('selectedBackground', selectedBg);
-      if (lastShowerDate) {
-        localStorage.setItem('lastShowerDate', lastShowerDate);
-      }
-    }
-  }, [health, lastFed, level, experience, experienceToNextLevel, isDead, stats, selectedBg, overfeedCount, lastShowerDate]);
-
-// Fonction de nourriture modifiée
-const feed = () => {
-  if (!animation && !isDead && !isReviving && !isShowering) {
-    setAnimation(true);
-    
-    // Gestion de l'overfeeding
-    if (health >= 100) {
-      setOverfeedCount(prev => {
-        const newCount = prev + 1;
-        if (newCount >= OVERFEED_LIMIT) {
-          setTimeout(() => {
-            setIsDead(true);
-            setHealth(0);
-          }, 1000);
+    if (user && !isDead) {
+      const saveGameState = async () => {
+        try {
+          const dataToSave = {
+            health,
+            lastFed,
+            level,
+            experience,
+            experienceToNextLevel,
+            overfeedCount,
+            stats,
+            selectedBg,
+            lastShowerDate,
+            lastUpdate: Date.now()
+          };
+          
+          await setDoc(doc(db, 'saves', user.uid), dataToSave);
+        } catch (error) {
+          console.error('Erreur de sauvegarde:', error);
         }
-        return newCount;
-      });
-      // On ne modifie plus la santé, on garde juste le compteur d'overfeeding
-    } else {
-      setHealth(prev => Math.min(100, prev + 20));
-      setOverfeedCount(0); // Reset le compteur si la santé n'est pas à 100%
+      };
+
+      const saveTimeout = setTimeout(saveGameState, 1000);
+      return () => clearTimeout(saveTimeout);
     }
+  }, [health, lastFed, level, experience, experienceToNextLevel, isDead, stats, selectedBg, overfeedCount, lastShowerDate, user]);
 
-    setStats(prev => ({
-      ...prev,
-      totalFeeds: prev.totalFeeds + 1
-    }));
-
-    setTimeout(() => {
-      setLastFed(Date.now());
-      setAnimation(false);
-      // N'ajoute de l'expérience que si la santé n'est pas à 100%
-      if (health < 100) {
-        addExperience(XP_GAIN);
+  // Fonction de nourriture
+  const feed = () => {
+    if (!animation && !isDead && !isReviving && !isShowering) {
+      setAnimation(true);
+      
+      if (health >= 100) {
+        setOverfeedCount(prev => {
+          const newCount = prev + 1;
+          if (newCount >= OVERFEED_LIMIT) {
+            setTimeout(() => {
+              setIsDead(true);
+              setHealth(0);
+            }, 1000);
+          }
+          return newCount;
+        });
+      } else {
+        setHealth(prev => Math.min(100, prev + 15));
+        setOverfeedCount(0);
       }
-    }, 1000);
-  }
-};
 
-  // Fonction de douche modifiée
+      setStats(prev => ({
+        ...prev,
+        totalFeeds: prev.totalFeeds + 1
+      }));
+
+      setTimeout(() => {
+        setLastFed(Date.now());
+        setAnimation(false);
+        if (health < 100) {
+          addExperience(XP_GAIN);
+        }
+      }, 1000);
+    }
+  };
+
+  // Fonction de douche
   const shower = () => {
     if (canShower() && !animation && !isDead && !isReviving && !isShowering) {
       setIsShowering(true);
@@ -356,7 +359,6 @@ const feed = () => {
             addExperience(XP_GAIN * SHOWER_XP_MULTIPLIER);
             setIsShowering(false);
             setLastShowerDate(new Date().toISOString());
-            localStorage.setItem('lastShowerDate', new Date().toISOString());
             return null;
           }
           return prev - 1;
@@ -370,19 +372,23 @@ const feed = () => {
     }
   };
 
-// Fonction de résurrection
-const revive = () => {
-  if (isDead) {
-    setStats(prev => ({
-      ...prev,
-      totalRevives: prev.totalRevives + 1
-    }));
-    resetProgress();
-    setIsDead(false);
-    setIsReviving(true);
-    setReviveStartTime(Date.now());
-  }
-};
+// Fonction de résurrection modifiée
+  const revive = () => {
+    if (isDead) {
+      setStats(prev => ({
+        ...prev,
+        totalRevives: prev.totalRevives + 1
+      }));
+      // Perte d'un niveau à la mort
+      setLevel(prevLevel => Math.max(1, prevLevel - 1));
+      setExperience(0);
+      setExperienceToNextLevel(calculateExperienceToNextLevel(Math.max(1, level - 1)));
+      setOverfeedCount(0);
+      setIsDead(false);
+      setIsReviving(true);
+      setReviveStartTime(Date.now());
+    }
+  };
 
   // Reset du progrès
   const resetProgress = () => {
@@ -390,7 +396,6 @@ const revive = () => {
     setExperience(0);
     setExperienceToNextLevel(100);
     setOverfeedCount(0);
-    localStorage.removeItem('tamagotchiData');
   };
 
   // Redémarrage du jeu
@@ -413,12 +418,11 @@ const revive = () => {
     setExperienceToNextLevel(100);
     setSelectedBg(1);
     setOverfeedCount(0);
-    localStorage.clear();
     setShowConfirmRestart(false);
     setShowConfirmRestartAgain(false);
   };
 
-  // Effet de résurrection
+  // Effet de résurrection (4 heures)
   useEffect(() => {
     if (isReviving && reviveStartTime) {
       const timer = setInterval(() => {
@@ -428,29 +432,27 @@ const revive = () => {
           setHealth(50);
           setLastFed(Date.now());
         }
-      }, 100);
+      }, 1000);
       return () => clearInterval(timer);
     }
   }, [isReviving, reviveStartTime]);
 
-  // Diminution de la santé
+  // Effet pour réinitialiser overfeedCount quand la santé descend
+  useEffect(() => {
+    if (health < 100) {
+      setOverfeedCount(0);
+    }
+  }, [health]);
+
+  // Diminution de la santé (50% en 24h, mort en 48h)
   useEffect(() => {
     if (!isDead && !isReviving) {
       const timer = setInterval(() => {
         setHealth(prevHealth => {
           const hoursSinceLastFed = (Date.now() - lastFed) / (1000 * 60 * 60);
-          let decrease = 0;
-
-          if (hoursSinceLastFed >= 72) {
-            decrease = 0.5; // Mort très rapide après 72h
-          } else if (hoursSinceLastFed >= 48) {
-            decrease = 0.3; // Diminution rapide après 48h
-          } else if (hoursSinceLastFed >= 24) {
-            decrease = 0.2; // Diminution moyenne après 24h
-          } else if (hoursSinceLastFed >= 12) {
-            decrease = 0.1; // Diminution lente après 12h
-          }
-
+          // Perte linéaire : 50% en 24h, donc environ 2.083% par heure
+          const decrease = (2.083 / 60); // Par minute pour une mise à jour plus fluide
+          
           const newHealth = Math.max(0, prevHealth - decrease);
           
           if (newHealth <= 0 && !isDead) {
@@ -463,6 +465,42 @@ const revive = () => {
       return () => clearInterval(timer);
     }
   }, [isDead, isReviving, lastFed]);
+
+  // Vérification de l'état de connexion au chargement
+  useEffect(() => {
+    const unsubscribe = auth.onAuthStateChanged((user) => {
+      setUser(user);
+      if (user) {
+        loadSavedData(user.uid);
+      }
+      setLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="w-full h-full flex items-center justify-center">
+        <div className="text-white">Chargement...</div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="w-full h-full flex items-center justify-center bg-gray-900">
+        <div className="text-center space-y-4">
+          <h1 className="text-2xl text-white mb-4 font-early-gameboy">Mon Tamagotchi</h1>
+          <button 
+            onClick={signInWithGoogle}
+            className="bg-white text-gray-800 px-6 py-3 rounded-lg shadow-lg hover:bg-gray-100 transition-colors font-early-gameboy"
+          >
+            Se connecter avec Google
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   const currentState = animation ? 'eating' : getState(health);
 
@@ -478,7 +516,7 @@ const revive = () => {
       />
 
       <div 
-   className="relative w-full max-w-[320px] p-4 rounded-xl overflow-hidden shadow-xl bg-gray-800/30 backdrop-blur-sm"
+        className="relative w-full max-w-[320px] p-4 rounded-xl overflow-hidden shadow-xl bg-gray-800/30 backdrop-blur-sm"
         style={{
           backgroundImage: `url('/images/Backgrounds/bg${selectedBg}.jpeg')`,
           backgroundSize: 'cover',
@@ -548,7 +586,12 @@ const revive = () => {
 
           {isReviving && (
             <div className="text-xs text-white text-center mb-4 bg-black/40 backdrop-blur-sm rounded-lg p-2 font-early-gameboy">
-              {`Résurrection dans ${Math.max(0, Math.ceil(ZOMBIE_DURATION - ((Date.now() - reviveStartTime) / 1000)))} secondes`}
+              {(() => {
+                const timeLeft = Math.max(0, Math.ceil(ZOMBIE_DURATION - ((Date.now() - reviveStartTime) / 1000)));
+                const hours = Math.floor(timeLeft / 3600);
+                const minutes = Math.floor((timeLeft % 3600) / 60);
+                return `Résurrection dans ${hours}h ${minutes}m`;
+              })()}
             </div>
           )}
 
