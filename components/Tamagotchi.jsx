@@ -110,43 +110,46 @@ const StatsPanel = ({ isOpen, onClose, stats, level, selectedBg, onBgChange }) =
 };
 
 export default function Tamagotchi() {
-  // États pour l'authentification
+  // États pour Firebase et authentification
+  const [firebaseInitialized, setFirebaseInitialized] = useState(false);
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  // États du jeu
-  const [showConfirmRestart, setShowConfirmRestart] = useState(false);
-  const [showConfirmRestartAgain, setShowConfirmRestartAgain] = useState(false);
-  const [lastShowerDate, setLastShowerDate] = useState(null);
-  const [showerAvailableMessage, setShowerAvailableMessage] = useState(false);
-  const [isShowering, setIsShowering] = useState(false);
-  const [showerTimeLeft, setShowerTimeLeft] = useState(null);
-  const [isStatsOpen, setIsStatsOpen] = useState(false);
-  const [selectedBg, setSelectedBg] = useState(1);
-  const [stats, setStats] = useState({
-    totalFeeds: 0,
-    totalShowers: 0,
-    maxLevel: 1,
-    totalRevives: 0,
-    totalXP: 0
-  });
-  const [health, setHealth] = useState(100);
-  const [lastFed, setLastFed] = useState(Date.now());
-  const [animation, setAnimation] = useState(false);
-  const [isDead, setIsDead] = useState(false);
-  const [isReviving, setIsReviving] = useState(false);
-  const [reviveStartTime, setReviveStartTime] = useState(null);
-  const [level, setLevel] = useState(1);
-  const [experience, setExperience] = useState(0);
-  const [experienceToNextLevel, setExperienceToNextLevel] = useState(100);
-  const [overfeedCount, setOverfeedCount] = useState(0);
+// États du jeu
+const [animation, setAnimation] = useState(false);
+const [isOverfed, setIsOverfed] = useState(false);
+const [overfedTimeout, setOverfedTimeout] = useState(null);
+const [showConfirmRestart, setShowConfirmRestart] = useState(false);
+const [showConfirmRestartAgain, setShowConfirmRestartAgain] = useState(false);
+const [lastShowerDate, setLastShowerDate] = useState(null);
+const [showerAvailableMessage, setShowerAvailableMessage] = useState(false);
+const [isShowering, setIsShowering] = useState(false);
+const [showerTimeLeft, setShowerTimeLeft] = useState(null);
+const [isStatsOpen, setIsStatsOpen] = useState(false);
+const [selectedBg, setSelectedBg] = useState(1);
+const [stats, setStats] = useState({
+  totalFeeds: 0,
+  totalShowers: 0,
+  maxLevel: 1,
+  totalRevives: 0,
+  totalXP: 0
+});
+const [health, setHealth] = useState(100);
+const [lastFed, setLastFed] = useState(Date.now());
+const [isDead, setIsDead] = useState(false);
+const [isReviving, setIsReviving] = useState(false);
+const [reviveStartTime, setReviveStartTime] = useState(null);
+const [level, setLevel] = useState(1);
+const [experience, setExperience] = useState(0);
+const [experienceToNextLevel, setExperienceToNextLevel] = useState(100);
+const [overfeedCount, setOverfeedCount] = useState(0);
 
   // Constantes
   const SHOWER_DURATION = 5;
   const ZOMBIE_DURATION = 14400; // 4 heures en secondes
   const XP_GAIN = 20;
   const SHOWER_XP_MULTIPLIER = 2;
-  const OVERFEED_LIMIT = 10;
+  const OVERFEED_LIMIT = 6; // Mort après 6 nourritures à 100%
 
   // États du Tamagotchi
   const states = {
@@ -201,19 +204,19 @@ export default function Tamagotchi() {
   };
 
   // Fonction pour obtenir l'état actuel
-  const getState = (healthValue) => {
+const getState = (healthValue) => {
     if (isDead) return 'dead';
     if (isReviving) return 'zombie';
     if (isShowering) return 'showering';
+    if (isOverfed) return 'overfed';
     if (animation) return 'eating';
-    if (overfeedCount > 0 && health >= 100) return 'overfed';
     if (healthValue <= 20) return 'sad';
     if (healthValue <= 50) return 'bad';
     if (healthValue <= 80) return 'ok';
     return 'happy';
   };
 
-  // Calcul de l'expérience requise pour le niveau suivant
+// Calcul de l'expérience requise pour le niveau suivant
   const calculateExperienceToNextLevel = (currentLevel) => {
     return Math.floor(100 * Math.pow(1.5, currentLevel - 1));
   };
@@ -277,70 +280,53 @@ export default function Tamagotchi() {
            lastShower.getFullYear() !== now.getFullYear();
   };
 
-  // Sauvegarde automatique dans Firebase
-  useEffect(() => {
-    if (user && !isDead) {
-      const saveGameState = async () => {
-        try {
-          const dataToSave = {
-            health,
-            lastFed,
-            level,
-            experience,
-            experienceToNextLevel,
-            overfeedCount,
-            stats,
-            selectedBg,
-            lastShowerDate,
-            lastUpdate: Date.now()
-          };
-          
-          await setDoc(doc(db, 'saves', user.uid), dataToSave);
-        } catch (error) {
-          console.error('Erreur de sauvegarde:', error);
-        }
-      };
-
-      const saveTimeout = setTimeout(saveGameState, 1000);
-      return () => clearTimeout(saveTimeout);
-    }
-  }, [health, lastFed, level, experience, experienceToNextLevel, isDead, stats, selectedBg, overfeedCount, lastShowerDate, user]);
-
-  // Fonction de nourriture
+  // Mise à jour de la fonction feed
   const feed = () => {
     if (!animation && !isDead && !isReviving && !isShowering) {
-      setAnimation(true);
-      
       if (health >= 100) {
-        setOverfeedCount(prev => {
-          const newCount = prev + 1;
-          if (newCount >= OVERFEED_LIMIT) {
-            setTimeout(() => {
-              setIsDead(true);
-              setHealth(0);
-            }, 1000);
-          }
-          return newCount;
-        });
+        // Incrémenter le compteur d'overfeed
+        const newOverfeedCount = overfeedCount + 1;
+        setOverfeedCount(newOverfeedCount);
+        
+        // Mettre à jour l'état overfed
+        setIsOverfed(true);
+        
+        // Nettoyer l'ancien timeout s'il existe
+        if (overfedTimeout) {
+          clearTimeout(overfedTimeout);
+        }
+        
+        // Définir un nouveau timeout pour réinitialiser l'état overfed
+        const timeout = setTimeout(() => {
+          setIsOverfed(false);
+        }, 3000);
+        setOverfedTimeout(timeout);
+
+        // Vérifier si le nombre de suralimentation atteint la limite
+        if (newOverfeedCount >= OVERFEED_LIMIT) {
+          setIsDead(true);
+          setHealth(0);
+          return;
+        }
       } else {
+        // Comportement normal quand la santé est inférieure à 100%
+        setAnimation(true);
         setHealth(prev => Math.min(100, prev + 15));
-        setOverfeedCount(0);
+        setTimeout(() => {
+          setAnimation(false);
+          addExperience(XP_GAIN);
+        }, 1000);
       }
 
+    // Mettre à jour les statistiques et le moment du dernier repas
       setStats(prev => ({
         ...prev,
         totalFeeds: prev.totalFeeds + 1
       }));
-
-      setTimeout(() => {
-        setLastFed(Date.now());
-        setAnimation(false);
-        if (health < 100) {
-          addExperience(XP_GAIN);
-        }
-      }, 1000);
+      setLastFed(Date.now());
     }
   };
+
 
   // Fonction de douche
   const shower = () => {
@@ -372,14 +358,13 @@ export default function Tamagotchi() {
     }
   };
 
-// Fonction de résurrection modifiée
+  // Fonction de résurrection
   const revive = () => {
     if (isDead) {
       setStats(prev => ({
         ...prev,
         totalRevives: prev.totalRevives + 1
       }));
-      // Perte d'un niveau à la mort
       setLevel(prevLevel => Math.max(1, prevLevel - 1));
       setExperience(0);
       setExperienceToNextLevel(calculateExperienceToNextLevel(Math.max(1, level - 1)));
@@ -441,8 +426,21 @@ export default function Tamagotchi() {
   useEffect(() => {
     if (health < 100) {
       setOverfeedCount(0);
+      setIsOverfed(false);
+      if (overfedTimeout) {
+        clearTimeout(overfedTimeout);
+      }
     }
-  }, [health]);
+  }, [health, overfedTimeout]);
+
+  // Effet pour nettoyer les timers
+  useEffect(() => {
+    return () => {
+      if (overfedTimeout) {
+        clearTimeout(overfedTimeout);
+      }
+    };
+  }, [overfedTimeout]);
 
   // Diminution de la santé (50% en 24h, mort en 48h)
   useEffect(() => {
@@ -450,8 +448,7 @@ export default function Tamagotchi() {
       const timer = setInterval(() => {
         setHealth(prevHealth => {
           const hoursSinceLastFed = (Date.now() - lastFed) / (1000 * 60 * 60);
-          // Perte linéaire : 50% en 24h, donc environ 2.083% par heure
-          const decrease = (2.083 / 60); // Par minute pour une mise à jour plus fluide
+          const decrease = (2.083 / 60); // 50% en 24h
           
           const newHealth = Math.max(0, prevHealth - decrease);
           
@@ -473,12 +470,42 @@ export default function Tamagotchi() {
       if (user) {
         loadSavedData(user.uid);
       }
+      setFirebaseInitialized(true);
       setLoading(false);
     });
     return () => unsubscribe();
   }, []);
 
-  if (loading) {
+  // Sauvegarde automatique dans Firebase
+  useEffect(() => {
+    if (user && !isDead) {
+      const saveGameState = async () => {
+        try {
+          const dataToSave = {
+            health,
+            lastFed,
+            level,
+            experience,
+            experienceToNextLevel,
+            overfeedCount,
+            stats,
+            selectedBg,
+            lastShowerDate,
+            lastUpdate: Date.now()
+          };
+          
+          await setDoc(doc(db, 'saves', user.uid), dataToSave);
+        } catch (error) {
+          console.error('Erreur de sauvegarde:', error);
+        }
+      };
+
+      const saveTimeout = setTimeout(saveGameState, 1000);
+      return () => clearTimeout(saveTimeout);
+    }
+  }, [health, lastFed, level, experience, experienceToNextLevel, isDead, stats, selectedBg, overfeedCount, lastShowerDate, user]);
+
+  if (!firebaseInitialized || loading) {
     return (
       <div className="w-full h-full flex items-center justify-center">
         <div className="text-white">Chargement...</div>
@@ -608,7 +635,7 @@ export default function Tamagotchi() {
                 font-early-gameboy`}
               onClick={isDead ? revive : feed}
               disabled={animation || isReviving || isShowering}
-            >
+>
               {isDead ? 'Ressusciter' : (isReviving ? 'En cours...' : (animation ? 'Miam...' : 'Nourrir'))}
             </button>
 
