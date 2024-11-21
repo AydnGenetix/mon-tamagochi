@@ -21,14 +21,21 @@
 body {
   color: var(--foreground);
   background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
 }
 
 @font-face {
   font-family: 'earlygameboy';
   src: url('/fonts/earlygameboy.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
 }
 
 * {
-  font-family: 'earlygameboy', sans-serif;
+  font-family: 'earlygameboy', var(--font-geist-sans), sans-serif;
+}
+
+.font-early-gameboy {
+  font-family: 'earlygameboy', monospace;
+  font-weight: normal;
 }
